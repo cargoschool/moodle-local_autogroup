@@ -1,3 +1,12 @@
+## v4.5.3-cargoschool.1 (CargoSchool fork)
+  * The institution field may hold several sites separated by " - " (space hyphen space): the user joins one group per site.
+  * The institution value "*" joins every existing site group of the course whose site belongs to one of the user's tenants (requires local_cargoservices 0.18.0 or later).
+  * Users holding "*" are realigned when a site group appears or a user leaves a site group.
+  * Empty institutions and single values behave exactly as upstream.
+  * requires Moodle 4.5, supported 4.5 to 5.1.
+  * Rebased on upstream 4.5.3.
+  * See CARGOSCHOOL.md.
+
 ## v4.5.3
   * Scope role-change membership verification to the event's course.
 

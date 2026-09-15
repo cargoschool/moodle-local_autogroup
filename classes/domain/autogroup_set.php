@@ -170,6 +170,11 @@ class autogroup_set extends domain {
      */
     private function initialise() {
         $this->sortmodule = new $this->sortmodulename($this->sortconfig, $this->courseid);
+        // CARGOSCHOOL: start. The "*" institution needs to know its set.
+        if (method_exists($this->sortmodule, 'cargoschool_set_setid')) {
+            $this->sortmodule->cargoschool_set_setid((int)$this->id);
+        }
+        // CARGOSCHOOL: end.
     }
 
     /**
@@ -452,9 +457,17 @@ class autogroup_set extends domain {
         // An array of groupids which will be populated as we ensure membership.
         $validgroups = array();
         $newgroup = false;
+        // CARGOSCHOOL: start.
+        $cargoschoolchanged = false;
+        // CARGOSCHOOL: end.
 
         foreach ($eligiblegroups as $eligiblegroup) {
             list($group, $groupcreated) = $this->get_or_create_group_by_idnumber($eligiblegroup, $db);
+            // CARGOSCHOOL: start.
+            if ($groupcreated) {
+                $cargoschoolchanged = true;
+            }
+            // CARGOSCHOOL: end.
             if ($group) {
                 $validgroups[] = $group->id;
                 $group->ensure_user_is_member($user->id);
@@ -469,14 +482,85 @@ class autogroup_set extends domain {
         // Now run through other groups and ensure user is not a member.
         foreach ($this->groups as $key => $group) {
             if (!in_array($group->id, $validgroups)) {
-                if ($group->ensure_user_is_not_member($user->id) && $newgroup) {
+                // CARGOSCHOOL: start. Same logic as upstream, the result is kept.
+                $removed = $group->ensure_user_is_not_member($user->id);
+                if ($removed) {
+                    $cargoschoolchanged = true;
+                }
+                if ($removed && $newgroup) {
                     $this->update_forums($user->id, $group->id, $newgroup, $db);
                 }
+                // CARGOSCHOOL: end.
             }
         }
 
+        // CARGOSCHOOL: start.
+        if ($cargoschoolchanged) {
+            $this->cargoschool_refresh_all_sites_users($user, $db, $context);
+        }
+        // CARGOSCHOOL: end.
+
         return true;
     }
+
+    // CARGOSCHOOL: start.
+    /**
+     * Realigns the users holding "*" after the site groups of the course changed.
+     *
+     * A new site group appeared (a user with a new site joined the course), or a
+     * user left a site group (so it may have to disappear): the managers of the
+     * course holding "*" are verified again, so that they join the new group
+     * and leave the groups whose site no longer exists. Users holding "*" never
+     * create groups, so this cannot loop.
+     *
+     * @param \stdclass $user The user whose membership changed.
+     * @param \moodle_database $db
+     * @param \context_course $context
+     * @return void
+     */
+    private function cargoschool_refresh_all_sites_users(
+        \stdclass $user,
+        \moodle_database $db,
+        \context_course $context
+    ) {
+        $sortclass = '\\local_autogroup\\sort_module\\profile_field';
+        if (!($this->sortmodule instanceof $sortclass) || $this->sortmodule->grouping_by() !== 'institution') {
+            return;
+        }
+        if ($sortclass::cargoschool_is_all_sites((string)($user->institution ?? ''))) {
+            return;
+        }
+        if (!class_exists('\\local_cargoservices\\manager')) {
+            return;
+        }
+
+        $sql = "SELECT DISTINCT u.*
+                  FROM {user} u
+                  JOIN {user_enrolments} ue ON ue.userid = u.id
+                  JOIN {enrol} e ON e.id = ue.enrolid
+                 WHERE e.courseid = :courseid
+                   AND u.deleted = 0
+                   AND u.id <> :userid
+                   AND " . $db->sql_like('u.institution', ':star');
+        $candidates = $db->get_records_sql($sql, [
+            'courseid' => $this->courseid,
+            'userid' => (int)$user->id,
+            'star' => '%' . $sortclass::CARGOSCHOOL_ALL_SITES . '%',
+        ]);
+        if (empty($candidates)) {
+            return;
+        }
+
+        // Every "*" user of the course is verified, not only those sharing the
+        // tenant of the user who changed: when a user moves to another company,
+        // the managers of the company he left must leave the abandoned site too.
+        foreach ($candidates as $candidate) {
+            if ($sortclass::cargoschool_is_all_sites((string)$candidate->institution)) {
+                $this->verify_user_group_membership($candidate, $db, $context);
+            }
+        }
+    }
+    // CARGOSCHOOL: end.
 
     /**
      * Whether or not the user is eligible to be grouped

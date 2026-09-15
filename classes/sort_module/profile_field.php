@@ -36,6 +36,28 @@ use stdClass;
  * @package local_autogroup\domain
  */
 class profile_field extends sort_module {
+    // CARGOSCHOOL: start.
+    /**
+     * Marker read by local_cargoservices to know that this is the CargoSchool version.
+     *
+     * The CargoSchool version understands two extra values of the institution field:
+     * several sites separated by " - " (space hyphen space), and "*" meaning every
+     * site of the user's tenants. Any other value behaves exactly as upstream.
+     */
+    public const CARGOSCHOOL_MULTISITE = true;
+
+    /** Value of the institution field meaning "every site of my tenants". */
+    public const CARGOSCHOOL_ALL_SITES = '*';
+
+    /** Separator of a multi-site institution (space hyphen space). */
+    public const CARGOSCHOOL_SEPARATOR_REGEX = '/\s+-(?:\s+-)*\s+/';
+
+    /**
+     * @var int Id of the autogroup set using this module, 0 when unknown.
+     */
+    private $cargoschoolsetid = 0;
+    // CARGOSCHOOL: end.
+
     /**
      * @var string
      */
@@ -93,10 +115,144 @@ class profile_field extends sort_module {
     public function eligible_groups_for_user(stdClass $user) {
         $field = $this->field;
         if (isset($user->$field) && !empty($user->$field)) {
+            // CARGOSCHOOL: start. Several sites or "*" in the institution field.
+            if ($field === 'institution') {
+                $value = (string)$user->$field;
+                if (self::cargoschool_is_all_sites($value)) {
+                    return $this->cargoschool_all_sites($user);
+                }
+                if (self::cargoschool_is_multi_site($value)) {
+                    return self::cargoschool_split_sites($user);
+                }
+            }
+            // CARGOSCHOOL: end.
             return [$user->$field];
         }
         return [];
     }
+
+    // CARGOSCHOOL: start.
+    /**
+     * Tells the module which autogroup set it belongs to.
+     *
+     * Needed by "*": only the groups of this very set are considered.
+     *
+     * @param int $setid Autogroup set id.
+     * @return void
+     */
+    public function cargoschool_set_setid($setid) {
+        $this->cargoschoolsetid = (int)$setid;
+    }
+
+    /**
+     * Whether an institution value means "every site of my tenants".
+     *
+     * @param string $value Raw institution value.
+     * @return bool
+     */
+    public static function cargoschool_is_all_sites($value) {
+        return trim((string)$value) === self::CARGOSCHOOL_ALL_SITES;
+    }
+
+    /**
+     * Whether an institution value lists several sites.
+     *
+     * @param string $value Raw institution value.
+     * @return bool
+     */
+    public static function cargoschool_is_multi_site($value) {
+        return (bool)preg_match(self::CARGOSCHOOL_SEPARATOR_REGEX, (string)$value);
+    }
+
+    /**
+     * The sites listed in a multi-site institution.
+     *
+     * local_cargoservices is the single place where the convention is read; the
+     * local fallback applies the same rule when it is not installed.
+     *
+     * @param stdClass $user User record.
+     * @return array Site names, without "*" and without duplicates.
+     */
+    public static function cargoschool_split_sites(stdClass $user) {
+        $manager = '\\local_cargoservices\\manager';
+        if (class_exists($manager) && method_exists($manager, 'get_user_sites')) {
+            $sites = \local_cargoservices\manager::get_user_sites($user);
+            return array_values(array_filter($sites, function ($site) {
+                return $site !== self::CARGOSCHOOL_ALL_SITES;
+            }));
+        }
+
+        $sites = [];
+        foreach (preg_split(self::CARGOSCHOOL_SEPARATOR_REGEX, (string)$user->institution) as $part) {
+            $site = trim($part);
+            if ($site === '' || $site === self::CARGOSCHOOL_ALL_SITES) {
+                continue;
+            }
+            $key = \core_text::strtolower($site);
+            if (!isset($sites[$key])) {
+                $sites[$key] = $site;
+            }
+        }
+        return array_values($sites);
+    }
+
+    /**
+     * The existing site groups of this set that belong to the user's tenants.
+     *
+     * "*" never creates a group: it only joins the site groups already present in
+     * the course, and only those of sites belonging to one of the user's tenants
+     * (a course can be shared by several companies). Without local_cargoservices
+     * the tenants are unknown and no group is returned.
+     *
+     * @param stdClass $user User record (department and institution).
+     * @return array Site names, as stored in the group idnumbers.
+     */
+    private function cargoschool_all_sites(stdClass $user) {
+        global $DB;
+
+        $population = '\\local_cargoservices\\population';
+        if ($this->cargoschoolsetid < 1 || $this->courseid < 1) {
+            return [];
+        }
+        if (!class_exists($population) || !method_exists($population, 'tenant_sites')) {
+            return [];
+        }
+
+        $tenants = \local_cargoservices\manager::get_user_tenants($user);
+        if (empty($tenants)) {
+            return [];
+        }
+
+        $prefix = 'autogroup|' . $this->cargoschoolsetid . '|';
+        $idnumbers = $DB->get_fieldset_select(
+            'groups',
+            'idnumber',
+            'courseid = :courseid AND ' . $DB->sql_like('idnumber', ':prefix'),
+            ['courseid' => $this->courseid, 'prefix' => $DB->sql_like_escape($prefix) . '%']
+        );
+        if (empty($idnumbers)) {
+            return [];
+        }
+
+        $tenantsites = \local_cargoservices\population::tenant_sites($tenants);
+
+        $sites = [];
+        foreach ($idnumbers as $idnumber) {
+            $site = substr((string)$idnumber, strlen($prefix));
+            if ($site === '' || $site === false) {
+                continue;
+            }
+            if (self::cargoschool_is_all_sites($site) || self::cargoschool_is_multi_site($site)) {
+                continue;
+            }
+            $key = \local_cargoservices\population::normalise($site);
+            if (isset($tenantsites[$key])) {
+                $sites[$site] = $site;
+            }
+        }
+        return array_values($sites);
+    }
+    // CARGOSCHOOL: end.
 
     /**
      * @return bool|string
